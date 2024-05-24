@@ -33,12 +33,20 @@ type Bilibili struct {
 	Url      string
 	SessData string
 
-	httpClient *utils.CachedHttpClient
-	vt         videoType
+	httpClient     *utils.CachedHttpClient
+	vt             videoType
+	resourceInfos  []downloader.ResourceInfo
+	infoAcquired   bool
+	downloadParams map[string]string
 }
 
 func NewBilibili(url string, sessData string) *Bilibili {
-	return &Bilibili{Url: url, SessData: sessData, httpClient: utils.NewCachedHttpClient()}
+	return &Bilibili{
+		Url:            url,
+		SessData:       sessData,
+		httpClient:     utils.NewCachedHttpClient(),
+		downloadParams: make(map[string]string),
+	}
 }
 
 type videoType int
@@ -711,7 +719,9 @@ func (b *Bilibili) getRegularVideoInfo(htmlContent []byte) ([]downloader.Resourc
 		self.danmaku = get_content('https://comment.bilibili.com/%s.xml' % cid, headers=hd)
 	*/
 
-	return []downloader.ResourceInfo{videoInfo}, nil
+	b.infoAcquired = true
+	b.resourceInfos = []downloader.ResourceInfo{videoInfo}
+	return b.resourceInfos, nil
 }
 
 func (b *Bilibili) getVideoInfoBangumi(htmlContent []byte) ([]downloader.ResourceInfo, error) {
@@ -740,8 +750,22 @@ func (b *Bilibili) GetResourceInfo() ([]downloader.ResourceInfo, error) {
 	return b.getVideoInfo()
 }
 
-func (b *Bilibili) Download(index int, path string) (chan byte, error) {
-	return nil, downloader.ErrUnimplemented
+func (b *Bilibili) Download(index int, path string) chan *downloader.Progress {
+	progress := make(chan *downloader.Progress)
+	go func() {
+		defer close(progress)
+		if !b.infoAcquired {
+			progress <- &downloader.Progress{Status: "Getting video information.", Percentage: 0}
+			_, err := b.getVideoInfo()
+			if err != nil {
+				progress <- &downloader.Progress{Status: "", Percentage: 1, Err: fmt.Errorf("failed to get video information: %v", err)}
+				return
+			}
+
+			progress <- &downloader.Progress{Status: "Done. ", Percentage: 1}
+		}
+	}()
+	return progress
 }
 
 func (b *Bilibili) DownloadAll(path string) (chan byte, error) {

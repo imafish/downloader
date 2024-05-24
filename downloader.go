@@ -41,11 +41,17 @@ type StreamInfo struct {
 	Others       map[string]string
 }
 
+type Progress struct {
+	Status     string
+	Percentage float32
+	Err        error
+}
+
 // TODO better comment
 // 1. downloaders are one-off
 type Downloader interface {
 	CanHandle(url string) bool
 	GetResourceInfo() ([]ResourceInfo, error)
-	Download(index int, path string) (chan byte, error)
+	Download(index int, path string) chan *Progress
 	DownloadAll(path string) (chan byte, error)
 }

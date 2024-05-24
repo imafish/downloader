@@ -39,11 +39,54 @@ func main() {
 		}
 		printInfo(info)
 	case "download":
-		println("Not yet implemented.")
-		os.Exit(2)
+		progress := agent.Download(0, "")
+		for p := range progress {
+			if p.Err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to download. Error is: %v", p.Err)
+				os.Exit(102)
+			} else {
+				printProgress(p)
+			}
+		}
+		fmt.Println("")
 	default:
 		fmt.Fprintf(os.Stderr, "invalid command \"%s\"\n", command)
 	}
+}
+
+func printProgress(p *downloader.Progress) {
+	var sb strings.Builder
+	sb.WriteString("  ")
+	if len(p.Status) > 44 {
+		sb.WriteString(p.Status[:40])
+		sb.WriteString(" ...")
+	} else {
+		sb.WriteString(p.Status)
+		sb.WriteString(strings.Repeat(" ", 44-len(p.Status)))
+	}
+
+	// progress bar
+	left := int(p.Percentage * 20)
+	if left == 20 {
+		left = 19
+	}
+	sb.WriteRune('[')
+	sb.WriteString(strings.Repeat("-", left))
+	sb.WriteRune('>')
+	sb.WriteString(strings.Repeat("-", 19-left))
+	sb.WriteRune(']')
+	var percentageStr string
+	if p.Percentage == 1.0 {
+		percentageStr = "100"
+	} else {
+		percentageStr = fmt.Sprintf("%.1f", p.Percentage*100)
+	}
+	if len(percentageStr) < 4 {
+		percentageStr = strings.Repeat(" ", 4-len(percentageStr)) + percentageStr
+	}
+	sb.WriteString(fmt.Sprintf(" %s%%", percentageStr))
+
+	fmt.Print(sb.String() + "\r")
 }
 
 func parseArgs() ([]string, map[string]string) {
