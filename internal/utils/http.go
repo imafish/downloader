@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
+	"strings"
 )
 
 type CachedHttpClient struct {
@@ -15,11 +17,22 @@ func NewCachedHttpClient() *CachedHttpClient {
 	return &CachedHttpClient{cache: make(map[string][]byte)}
 }
 
-// Get HTTP response with 'GET' verb
-func (c *CachedHttpClient) Get(req *http.Request) ([]byte, error) {
+// GetBody HTTP response with 'GET' verb
+func (c *CachedHttpClient) GetBody(req *http.Request) ([]byte, error) {
 
 	// try the cache
-	if data, ok := c.cache[req.URL.String()]; ok {
+	headers := map[string][]string(req.Header)
+	headerArr := make([]string, 0, len(headers))
+	for k, v := range headers {
+		headerArr = append(headerArr, fmt.Sprintf("%s-%v", k, v))
+	}
+	slices.Sort(headerArr)
+	sb := strings.Builder{}
+	sb.WriteString(req.URL.String())
+	sb.WriteString(strings.Join(headerArr, "."))
+	urlAndHeader := sb.String()
+
+	if data, ok := c.cache[urlAndHeader]; ok {
 		return data, nil
 	}
 
@@ -39,6 +52,6 @@ func (c *CachedHttpClient) Get(req *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read response body: %v", err)
 	}
 
-	c.cache[req.URL.String()] = content
+	c.cache[urlAndHeader] = content
 	return content, err2
 }

@@ -3,7 +3,6 @@ package agent
 import (
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -36,6 +35,10 @@ type Bilibili struct {
 
 	httpClient *utils.CachedHttpClient
 	vt         videoType
+}
+
+func NewBilibili(url string, sessData string) *Bilibili {
+	return &Bilibili{Url: url, SessData: sessData, httpClient: utils.NewCachedHttpClient()}
 }
 
 type videoType int
@@ -235,17 +238,43 @@ func hApiUrl(docid string) string {
 	return fmt.Sprintf("https://api.vc.bilibili.com/link_draw/v1/doc/detail?doc_id=%s", docid)
 }
 
-// getContent send http GET request to URL and returns the replied content
-
-// The http request is appended with bilibili headers
-func (b *Bilibili) getContent(url string, referer string, cookie string) ([]byte, error) {
-	req, _ := http.NewRequest("GET", url, nil)
-	header := getHeader(referer, cookie)
+// TODO create a cached and retry-able version
+func getContentLength(url string, header map[string]string) (int, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return 0, err
+	}
 	for k, v := range header {
 		req.Header.Add(k, v)
 	}
 
-	content, err := b.httpClient.Get(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("GET request got error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("http status code is %d", resp.StatusCode)
+	}
+
+	length, err := strconv.Atoi(resp.Header.Get("Content-Length"))
+	if err != nil {
+		return 0, fmt.Errorf(`response header "Content-Length" is not an integer`)
+	}
+	return length, nil
+}
+
+// getContent send http GET request to URL and returns the replied content
+
+// The http request is appended with bilibili headers
+func (b *Bilibili) getContent(url string, header map[string]string) ([]byte, error) {
+	req, _ := http.NewRequest("GET", url, nil)
+	for k, v := range header {
+		req.Header.Add(k, v)
+	}
+
+	content, err := b.httpClient.GetBody(req)
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +284,7 @@ func (b *Bilibili) getContent(url string, referer string, cookie string) ([]byte
 // convert url of some specific format into regular video url
 func (b *Bilibili) prepare() ([]byte, error) {
 	// TODO: add user SESSDATA to cookies
-	htmlContent, err := b.getContent(b.Url, "", "")
+	htmlContent, err := b.getContent(b.Url, getHeader("", ""))
 	if err != nil {
 		htmlContent = nil
 	}
@@ -284,12 +313,11 @@ func (b *Bilibili) prepare() ([]byte, error) {
 	} else if bangumiRegex1.MatchString(b.Url) || bangumiRegex2.MatchString(b.Url) {
 		regex := regexp.MustCompile(`__INITIAL_STATE__=(.*?);\(function\(\)`)
 		initialStateText := regex.FindSubmatch(htmlContent)[1]
-		var j interface{}
-		err := json.Unmarshal(initialStateText, &j)
+		j, err := utils.UnmarshalJson(initialStateText)
 		if err != nil {
 			return nil, fmt.Errorf("invalid json format when parsing bangumi content: %v", err)
 		}
-		epID, err := utils.JsonGetString(j, "epList.[0].id")
+		epID, err := j.GetString("epList.[0].id")
 		if err != nil {
 			return nil, fmt.Errorf("invalid json data when handling bangumi content: %v", err)
 		}
@@ -314,7 +342,7 @@ func (b *Bilibili) prepare() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	htmlContent, err = b.getContent(b.Url, referer, "")
+	htmlContent, err = b.getContent(b.Url, getHeader(referer, ""))
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +350,7 @@ func (b *Bilibili) prepare() ([]byte, error) {
 	return htmlContent, nil
 }
 
-func (b *Bilibili) GetVideoInfo() (*downloader.VideoInfo, error) {
+func (b *Bilibili) getVideoInfo() ([]downloader.ResourceInfo, error) {
 
 	// regulate url and get page content.
 	htmlContent, err := b.prepare()
@@ -356,34 +384,37 @@ func (b *Bilibili) GetVideoInfo() (*downloader.VideoInfo, error) {
 
 	case videoRegex.MatchString(b.Url):
 		b.vt = videoType_Video
-		return b.getVideoInfo(htmlContent)
+		return b.getRegularVideoInfo(htmlContent)
 	}
 
 	return nil, errors.ErrUnsupported
 }
 
-func (b *Bilibili) getVideoInfo(htmlContent []byte) (*downloader.VideoInfo, error) {
+func (b *Bilibili) getRegularVideoInfo(htmlContent []byte) ([]downloader.ResourceInfo, error) {
 	initialStateRegex := regexp.MustCompile(`__INITIAL_STATE__=(.*?);\(function\(\)`)
 	initialStateByte := initialStateRegex.FindSubmatch(htmlContent)[1]
-	var initialStateJson interface{}
-	err := json.Unmarshal(initialStateByte, &initialStateJson)
+	initialStateJson, err := utils.UnmarshalJson(initialStateByte)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse initial state as json: %v", err)
 	}
 
-	videoInfo := &downloader.VideoInfo{}
+	videoInfo := downloader.ResourceInfo{
+		Site:    "Bilibili",
+		Type:    downloader.RT_Video,
+		Streams: make([]downloader.StreamInfo, 0),
+	}
 	var avid, cid int
-	if utils.JsonHasKey(initialStateJson, "videoData") {
+	if initialStateJson.HasField("videoData") {
 		// This is a regular video
 
 		// TODO: show warning if this is a multi-part video
-		nParts, _ := utils.JsonGetInt(initialStateJson, "videoData.videos")
+		nParts, _ := initialStateJson.GetInt("videoData.videos")
 		isMultiPart := false
 		if nParts > 1 {
 			isMultiPart = true
 		}
 
-		videoInfo.Title, _ = utils.JsonGetString(initialStateJson, "videoData.title")
+		videoInfo.Name, _ = initialStateJson.GetString("videoData.title")
 		pRegex1 := regexp.MustCompile(`[\?&]p=(\d+)`)
 		pRegex2 := regexp.MustCompile(`/index_(\d+)`)
 		p1 := pRegex1.FindStringSubmatch(b.Url)
@@ -397,18 +428,18 @@ func (b *Bilibili) getVideoInfo(htmlContent []byte) (*downloader.VideoInfo, erro
 
 		// refine title for multi-part video
 		if isMultiPart {
-			part, err := utils.JsonGetInt(initialStateJson, fmt.Sprintf("videoData.pages.[%d].part", p-1))
+			part, err := initialStateJson.GetInt(fmt.Sprintf("videoData.pages.[%d].part", p-1))
 			if err != nil {
 				// log warning
 			}
-			videoInfo.Title = fmt.Sprintf("%s (P%d. %d)", videoInfo.Title, p, part)
+			videoInfo.Name = fmt.Sprintf("%s (P%d. %d)", videoInfo.Name, p, part)
 		}
 
-		avid, err = utils.JsonGetInt(initialStateJson, "aid")
+		avid, err = initialStateJson.GetInt("aid")
 		if err != nil {
 			// log
 		}
-		cid, err = utils.JsonGetInt(initialStateJson, fmt.Sprintf("videoData.pages.[%d].cid", p-1))
+		cid, err = initialStateJson.GetInt(fmt.Sprintf("videoData.pages.[%d].cid", p-1))
 		if err != nil {
 			// log
 		}
@@ -416,46 +447,46 @@ func (b *Bilibili) getVideoInfo(htmlContent []byte) (*downloader.VideoInfo, erro
 		// initial state does not contain key "videoData"
 		// meaning it's a festival video
 	} else {
-		videoInfo.Title, err = utils.JsonGetString(initialStateJson, "videoInfo.title")
+		videoInfo.Name, err = initialStateJson.GetString("videoInfo.title")
 		if err != nil {
 			// log
 		}
-		avid, err = utils.JsonGetInt(initialStateJson, "videoInfo.aid")
+		avid, err = initialStateJson.GetInt("videoInfo.aid")
 		if err != nil {
 			// log
 		}
-		cid, err = utils.JsonGetInt(initialStateJson, "videoInfo.cid")
+		cid, err = initialStateJson.GetInt("videoInfo.cid")
 		if err != nil {
 			// log
 		}
 	}
 
-	// Video Quality varations
+	// Video Quality variations
 	playInfoRegex := regexp.MustCompile(`__playinfo__=(.*?)</script><script>`)
 	playInfoByte1 := playInfoRegex.FindSubmatch(htmlContent)[1]
-	var playInfoJson1 interface{}
+	var playInfoJson1 *utils.JsonNode
 	if playInfoByte1 != nil {
-		err = json.Unmarshal(playInfoByte1, &playInfoJson1)
+		playInfoJson1, err = utils.UnmarshalJson(playInfoByte1)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse first playinfo data as json: %v", err)
 		}
-		code, err := utils.JsonGetInt(playInfoJson1, "code")
+		code, err := playInfoJson1.GetInt("code")
 		if err != nil || code != 0 {
 			playInfoJson1 = nil
 		}
 	}
-	htmlContent2, err := b.getContent(b.Url, "", "CURRENT_FNVAL=16")
+	htmlContent2, err := b.getContent(b.Url, getHeader("", "CURRENT_FNVAL=16"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get html content: %v", err)
 	}
-	var playInfoJson2 interface{}
+	var playInfoJson2 *utils.JsonNode
 	playInfoByte2 := playInfoRegex.FindSubmatch(htmlContent2)[1]
 	if playInfoByte2 != nil {
-		err = json.Unmarshal(playInfoByte2, &playInfoJson2)
+		playInfoJson2, err = utils.UnmarshalJson(playInfoByte2)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse second playinfo data as json: %v", err)
 		}
-		code, err := utils.JsonGetInt(playInfoJson2, "code")
+		code, err := playInfoJson2.GetInt("code")
 		if err != nil || code != 0 {
 			playInfoJson2 = nil
 		}
@@ -463,20 +494,18 @@ func (b *Bilibili) getVideoInfo(htmlContent []byte) (*downloader.VideoInfo, erro
 
 	currentQuality, bestQuality := -1, -1
 	if playInfoJson1 != nil {
-		currentQuality, err = utils.JsonGetInt(playInfoJson1, "data.quality")
+		currentQuality, err = playInfoJson1.GetInt("data.quality")
 		if err != nil {
 			currentQuality = -1
 			// log
 		}
-		if utils.JsonHasKey(playInfoJson1, "data.accept_quality") && utils.JsonArraySize(playInfoJson1, "data.accept_quality") > 0 {
-			bestQuality, err = utils.JsonGetInt(playInfoJson1, "data.accept_quality.[0]")
-			if err != nil {
-				bestQuality = -1
-				// log
-			}
+		bestQuality, err = playInfoJson1.GetInt("data.accept_quality.[0]")
+		if err != nil {
+			bestQuality = -1
+			// log
 		}
 	}
-	playInfos := make([]interface{}, 0)
+	playInfos := make([]*utils.JsonNode, 0)
 	if playInfoJson1 != nil {
 		playInfos = append(playInfos, playInfoJson1)
 	}
@@ -486,78 +515,214 @@ func (b *Bilibili) getVideoInfo(htmlContent []byte) (*downloader.VideoInfo, erro
 
 	// get alternative formats from API
 	qns := []int{120, 112, 80, 64, 32, 16}
-	var errMessage string
 	for _, qn := range qns {
 		// automatic format for durl: qn=0
 		// for dash, qn does not matter
 		if currentQuality == -1 || qn < currentQuality {
 			apiUrlStr := apiUrl(strconv.Itoa(avid), strconv.Itoa(cid), qn)
-			apiContent, err := b.getContent(apiUrlStr, b.Url, "")
+			apiContent, err := b.getContent(apiUrlStr, getHeader(b.Url, ""))
 			if err != nil {
 				return nil, fmt.Errorf("failed to get response from api url: %v", err)
 			}
-			var apiPlayInfoJson interface{}
-			err = json.Unmarshal(apiContent, &apiPlayInfoJson)
+			apiPlayInfoJson, err := utils.UnmarshalJson(apiContent)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse response from api url as json data: %v", err)
 			}
-			code, err := utils.JsonGetInt(apiPlayInfoJson, "code")
-			if code == 0 {
+			code, err := apiPlayInfoJson.GetInt("code")
+			if err == nil && code == 0 {
 				// success
 				playInfos = append(playInfos, apiPlayInfoJson)
 			} else {
-				errMessage, _ = utils.JsonGetString(apiPlayInfoJson, "data.message")
+				// log
+				// errMessage, _ = utils.JsonGetString(apiPlayInfoJson, "data.message")
 			}
 		}
-		if bestQuality != -1 || qn < bestQuality {
+		if bestQuality == -1 || qn < bestQuality {
 			interfaceApiUrlString := interfaceApiUrl(strconv.Itoa(cid), qn)
-			interfaceApiContent, err := b.getContent(interfaceApiUrlString, b.Url, "")
+			interfaceApiContent, err := b.getContent(interfaceApiUrlString, getHeader(b.Url, ""))
 			if err != nil {
 				return nil, fmt.Errorf("failed to get response from interface url: %v", err)
 			}
-			var interfaceApiJson interface{}
-			err = json.Unmarshal(interfaceApiContent, &interfaceApiJson)
+			interfaceApiJson, err := utils.UnmarshalJson(interfaceApiContent)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse response from interface url as json data: %v", err)
 			}
-			quality, err := utils.JsonGetInt(interfaceApiJson, "quality")
+			quality, err := interfaceApiJson.GetInt("quality")
 			if err != nil {
 				// log
 			}
 			if quality > 0 {
-				playInfos = append(playInfos, map[string]interface{}{"code": 0, "message": "0", "ttl": 1, "data": interfaceApiJson})
+				playInfos = append(playInfos, utils.NewJsonNode(map[string]interface{}{"code": 0, "message": "0", "ttl": 1, "data": interfaceApiJson}))
 			}
-		}
-		if len(playInfos) == 0 {
-			// TODO: research and replicate (if needed) the python behavior.
-			return nil, fmt.Errorf("got 0 video info.")
-		}
-
-		for _, playinfo := range playInfos {
-			quality, err := utils.JsonGetInt(playinfo, "data.quality")
-			if err != nil {
-				return nil, fmt.Errorf("ill-formated playinfo json data: %v", err)
-			}
-			st := streamTypes[quality]
-			formatId := st.Id
-			container := st.Container
-			desc := st.Desc
-
 		}
 	}
+	if len(playInfos) == 0 {
+		// TODO: research and replicate (if needed) the python behavior.
+		return nil, fmt.Errorf("got 0 video info.")
+	}
 
+	videoInfoMap := make(map[string]downloader.StreamInfo)
+	for _, playinfo := range playInfos {
+		quality, err := playinfo.GetInt("data.quality")
+		if err != nil {
+			return nil, fmt.Errorf("ill-formated playinfo json data: %v", err)
+		}
+		st := streamTypes[quality]
+		formatId := st.Id
+		if _, ok := videoInfoMap[formatId]; ok {
+			continue
+		}
+		container := st.Container
+		desc := st.Desc
+
+		durlArr, err := playinfo.GetArray("data.durl")
+		if err != nil {
+			// log
+		}
+		if len(durlArr) > 0 {
+			srcs := make([]string, 0)
+			sizes := 0
+			for _, elem := range durlArr {
+				durlJson := utils.NewJsonNode(elem)
+				src, err := durlJson.GetString("url")
+				if err != nil {
+					// log
+				}
+				size, err := durlJson.GetInt("size")
+				if err != nil {
+					// log
+				}
+				srcs = append(srcs, src)
+				sizes += size
+
+			}
+			videoInfoMap[formatId] = downloader.StreamInfo{
+				Id:           formatId,
+				Container:    container,
+				Size:         sizes,
+				Url:          srcs,
+				Others:       map[string]string{"Quality": desc},
+				DownloadWith: fmt.Sprintf("--format=%s", formatId)}
+		}
+
+		if dash, err := playinfo.GetSubnode("data.dash"); err == nil {
+			audioSizeCache := make(map[int]int)
+			videoArr, err := dash.GetArray("video")
+			if err != nil {
+				// log
+			}
+			for _, elem := range videoArr {
+				video := utils.NewJsonNode(elem)
+				quality, err := video.GetInt("id")
+				if err != nil {
+					// log
+					continue
+				}
+				st, ok := streamTypes[quality]
+				if !ok {
+					// log
+					continue
+				}
+				formatId := "dash-" + st.Id
+				if _, ok := videoInfoMap[formatId]; ok {
+					continue
+				}
+				container := "mp4"
+				desc := st.Desc
+				audioQuality := st.AudioQuality
+				baseurl, err := video.GetString("baseUrl")
+				if err != nil {
+					// log
+					baseurl = ""
+				}
+				size, err := getContentLength(baseurl, getHeader(b.Url, ""))
+				if err != nil {
+					return nil, fmt.Errorf("failed to get content length from url %s: %v", baseurl, err)
+				}
+
+				// find matching audio track
+				audioArr, err := dash.GetArray("audio")
+				if err != nil {
+					// log
+				} else if len(audioArr) > 0 {
+					var audioBaseUrl string
+					for _, elem := range audioArr {
+						audio := utils.NewJsonNode(elem)
+						if audioId, err := audio.GetInt("id"); err == nil {
+							if baseUrlTmp, err := audio.GetString("baseUrl"); err == nil {
+								if audioId == audioQuality {
+									audioBaseUrl = baseUrlTmp
+									break
+								}
+								if audioBaseUrl == "" {
+									audioBaseUrl = baseUrlTmp
+								}
+							} else {
+								// log
+							}
+						} else {
+							// log
+						}
+					}
+					if audioBaseUrl != "" {
+						if _, ok := audioSizeCache[audioQuality]; !ok {
+							audioSizeCache[audioQuality], err = getContentLength(audioBaseUrl, getHeader(b.Url, ""))
+							if err != nil {
+								return nil, fmt.Errorf("failed to get Content-Length for audio from url %s: %v", audioBaseUrl, err)
+							}
+						}
+						size += audioSizeCache[audioQuality]
+
+						videoInfoMap[formatId] = downloader.StreamInfo{
+							Id:           formatId,
+							Container:    container,
+							Url:          []string{baseurl, audioBaseUrl},
+							Size:         size,
+							DownloadWith: fmt.Sprintf("--format=%s", formatId),
+							Others:       map[string]string{"Quality": desc},
+						}
+					}
+
+				} else { //no audio info
+					videoInfoMap[formatId] = downloader.StreamInfo{
+						Id:           formatId,
+						Container:    container,
+						Url:          []string{baseurl},
+						Size:         size,
+						DownloadWith: fmt.Sprintf("--format=%s", formatId),
+						Others:       map[string]string{"Quality": desc},
+					}
+				}
+			}
+
+		} else {
+			// no "dash" field
+			// log
+		}
+	}
+	for _, v := range videoInfoMap {
+		videoInfo.Streams = append(videoInfo.Streams, v)
+	}
+
+	// get danmaku
+	/*
+		hd=self.bilibili_headers()
+		hd['If-Modified-Since']='Wed, 15 May 2024 01:01:24 GMT'
+		self.danmaku = get_content('https://comment.bilibili.com/%s.xml' % cid, headers=hd)
+	*/
+
+	return []downloader.ResourceInfo{videoInfo}, nil
+}
+
+func (b *Bilibili) getVideoInfoBangumi(htmlContent []byte) ([]downloader.ResourceInfo, error) {
 	return nil, downloader.ErrUnimplemented
 }
 
-func (b *Bilibili) getVideoInfoBangumi(htmlContent []byte) (*downloader.VideoInfo, error) {
+func (b *Bilibili) getVideoInfoLive(htmlContent []byte) ([]downloader.ResourceInfo, error) {
 	return nil, downloader.ErrUnimplemented
 }
 
-func (b *Bilibili) getVideoInfoLive(htmlContent []byte) (*downloader.VideoInfo, error) {
-	return nil, downloader.ErrUnimplemented
-}
-
-func (b *Bilibili) getVideoInfoVC(htmlContent []byte) (*downloader.VideoInfo, error) {
+func (b *Bilibili) getVideoInfoVC(htmlContent []byte) ([]downloader.ResourceInfo, error) {
 	return nil, downloader.ErrUnimplemented
 }
 
@@ -565,6 +730,20 @@ func (b *Bilibili) getVideoInfoVC(htmlContent []byte) (*downloader.VideoInfo, er
  *
  *
  */
-func (*Bilibili) GetInfo() (*downloader.FileInfo, error) {
-	return nil, errors.New("not implemented")
+
+func (*Bilibili) CanHandle(url string) bool {
+	matched, _ := regexp.MatchString(`(https?://)?(www\.)?bilibili\.com/`, url)
+	return matched
+}
+
+func (b *Bilibili) GetResourceInfo() ([]downloader.ResourceInfo, error) {
+	return b.getVideoInfo()
+}
+
+func (b *Bilibili) Download(index int, path string) (chan byte, error) {
+	return nil, downloader.ErrUnimplemented
+}
+
+func (b *Bilibili) DownloadAll(path string) (chan byte, error) {
+	return nil, downloader.ErrUnimplemented
 }
