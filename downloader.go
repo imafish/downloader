@@ -27,7 +27,8 @@ type ResourceInfo struct {
 	Type         ResourceType
 	DownloadWith string
 	Others       map[string]string
-	Streams      []StreamInfo
+	Streams      map[string]StreamInfo
+	DashStreams  map[string]StreamInfo
 }
 
 type StreamInfo struct {
@@ -37,7 +38,7 @@ type StreamInfo struct {
 	Container    string
 	Size         int
 	DownloadWith string
-	Url          []string
+	Url          [][]string
 	Others       map[string]string
 }
 

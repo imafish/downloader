@@ -149,7 +149,7 @@ func printInfo(info []downloader.ResourceInfo) {
 func printVideoInfo(info *downloader.ResourceInfo) {
 	fmt.Printf("Site:                       %s\n", info.Site)
 	fmt.Printf("Title:                      %s\n", info.Name)
-	streamCnt := len(info.Streams)
+	streamCnt := len(info.Streams) + len(info.DashStreams)
 	if streamCnt == 0 {
 		fmt.Println("Streams:                    !! No streams available !! Attaching authentication information may help.")
 	} else {
@@ -157,6 +157,19 @@ func printVideoInfo(info *downloader.ResourceInfo) {
 		if len(info.Streams) > 0 {
 			fmt.Println("  [ Video ] ___________________________________")
 			for _, s := range info.Streams {
+				fmt.Printf("  - format:                 %s\n", s.Id)
+				fmt.Printf("    container:              %s\n", s.Container)
+				fmt.Printf("    size:                   %s\n", readableBytes(s.Size))
+				fmt.Printf("    download with argument: %s\n", s.DownloadWith)
+				for k, v := range s.Others {
+					fmt.Printf("    %s:%s%s\n", k, strings.Repeat(" ", 23-len(k)), v)
+				}
+				fmt.Println("")
+			}
+		}
+		if len(info.DashStreams) > 0 {
+			fmt.Println("  [ Dash  ] ___________________________________")
+			for _, s := range info.DashStreams {
 				fmt.Printf("  - format:                 %s\n", s.Id)
 				fmt.Printf("    container:              %s\n", s.Container)
 				fmt.Printf("    size:                   %s\n", readableBytes(s.Size))

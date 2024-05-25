@@ -407,9 +407,10 @@ func (b *Bilibili) getRegularVideoInfo(htmlContent []byte) ([]downloader.Resourc
 	}
 
 	videoInfo := downloader.ResourceInfo{
-		Site:    "Bilibili",
-		Type:    downloader.RT_Video,
-		Streams: make([]downloader.StreamInfo, 0),
+		Site:        "Bilibili",
+		Type:        downloader.RT_Video,
+		Streams:     make(map[string]downloader.StreamInfo),
+		DashStreams: make(map[string]downloader.StreamInfo),
 	}
 	var avid, cid int
 	if initialStateJson.HasField("videoData") {
@@ -566,10 +567,9 @@ func (b *Bilibili) getRegularVideoInfo(htmlContent []byte) ([]downloader.Resourc
 	}
 	if len(playInfos) == 0 {
 		// TODO: research and replicate (if needed) the python behavior.
-		return nil, fmt.Errorf("got 0 video info.")
+		return nil, fmt.Errorf("got 0 video info")
 	}
 
-	videoInfoMap := make(map[string]downloader.StreamInfo)
 	for _, playinfo := range playInfos {
 		quality, err := playinfo.GetInt("data.quality")
 		if err != nil {
@@ -577,7 +577,7 @@ func (b *Bilibili) getRegularVideoInfo(htmlContent []byte) ([]downloader.Resourc
 		}
 		st := streamTypes[quality]
 		formatId := st.Id
-		if _, ok := videoInfoMap[formatId]; ok {
+		if _, ok := videoInfo.Streams[formatId]; ok {
 			continue
 		}
 		container := st.Container
@@ -604,11 +604,11 @@ func (b *Bilibili) getRegularVideoInfo(htmlContent []byte) ([]downloader.Resourc
 				sizes += size
 
 			}
-			videoInfoMap[formatId] = downloader.StreamInfo{
+			videoInfo.Streams[formatId] = downloader.StreamInfo{
 				Id:           formatId,
 				Container:    container,
 				Size:         sizes,
-				Url:          srcs,
+				Url:          [][]string{srcs},
 				Others:       map[string]string{"Quality": desc},
 				DownloadWith: fmt.Sprintf("--format=%s", formatId)}
 		}
@@ -632,7 +632,7 @@ func (b *Bilibili) getRegularVideoInfo(htmlContent []byte) ([]downloader.Resourc
 					continue
 				}
 				formatId := "dash-" + st.Id
-				if _, ok := videoInfoMap[formatId]; ok {
+				if _, ok := videoInfo.DashStreams[formatId]; ok {
 					continue
 				}
 				container := "mp4"
@@ -681,10 +681,10 @@ func (b *Bilibili) getRegularVideoInfo(htmlContent []byte) ([]downloader.Resourc
 						}
 						size += audioSizeCache[audioQuality]
 
-						videoInfoMap[formatId] = downloader.StreamInfo{
+						videoInfo.DashStreams[formatId] = downloader.StreamInfo{
 							Id:           formatId,
 							Container:    container,
-							Url:          []string{baseurl, audioBaseUrl},
+							Url:          [][]string{{baseurl}, {audioBaseUrl}},
 							Size:         size,
 							DownloadWith: fmt.Sprintf("--format=%s", formatId),
 							Others:       map[string]string{"Quality": desc},
@@ -692,10 +692,10 @@ func (b *Bilibili) getRegularVideoInfo(htmlContent []byte) ([]downloader.Resourc
 					}
 
 				} else { //no audio info
-					videoInfoMap[formatId] = downloader.StreamInfo{
+					videoInfo.DashStreams[formatId] = downloader.StreamInfo{
 						Id:           formatId,
 						Container:    container,
-						Url:          []string{baseurl},
+						Url:          [][]string{{baseurl}},
 						Size:         size,
 						DownloadWith: fmt.Sprintf("--format=%s", formatId),
 						Others:       map[string]string{"Quality": desc},
@@ -707,9 +707,6 @@ func (b *Bilibili) getRegularVideoInfo(htmlContent []byte) ([]downloader.Resourc
 			// no "dash" field
 			// log
 		}
-	}
-	for _, v := range videoInfoMap {
-		videoInfo.Streams = append(videoInfo.Streams, v)
 	}
 
 	// get danmaku
@@ -736,6 +733,22 @@ func (b *Bilibili) getVideoInfoVC(htmlContent []byte) ([]downloader.ResourceInfo
 	return nil, downloader.ErrUnimplemented
 }
 
+func (b *Bilibili) doDownload(progress chan *downloader.Progress) {
+	defer close(progress)
+	if !b.infoAcquired {
+		progress <- &downloader.Progress{Status: "Getting video information", Percentage: 0}
+		_, err := b.getVideoInfo()
+		if err != nil {
+			progress <- &downloader.Progress{Status: "", Percentage: 1, Err: fmt.Errorf("failed to get video information: %v", err)}
+			return
+		}
+	}
+
+	progress <- &downloader.Progress{Status: "Downloading... ", Percentage: 0.3}
+
+	progress <- &downloader.Progress{Status: "Done ", Percentage: 1}
+}
+
 /*
  *
  *
@@ -752,19 +765,7 @@ func (b *Bilibili) GetResourceInfo() ([]downloader.ResourceInfo, error) {
 
 func (b *Bilibili) Download(index int, path string) chan *downloader.Progress {
 	progress := make(chan *downloader.Progress)
-	go func() {
-		defer close(progress)
-		if !b.infoAcquired {
-			progress <- &downloader.Progress{Status: "Getting video information.", Percentage: 0}
-			_, err := b.getVideoInfo()
-			if err != nil {
-				progress <- &downloader.Progress{Status: "", Percentage: 1, Err: fmt.Errorf("failed to get video information: %v", err)}
-				return
-			}
-
-			progress <- &downloader.Progress{Status: "Done. ", Percentage: 1}
-		}
-	}()
+	go b.doDownload(progress)
 	return progress
 }
 
